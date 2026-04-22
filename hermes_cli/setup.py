@@ -1190,7 +1190,7 @@ def setup_terminal_backend(config: dict):
         print_info("Commands run directly on this machine.")
 
         # Shell selection (Windows only — Linux is always bash)
-        is_windows = _platform.system() == "Windows"
+        is_windows = sys.platform == "win32"
         if is_windows:
             print()
             print_info("Select the shell Hermes uses to run commands on your machine.")

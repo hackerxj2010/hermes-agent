@@ -314,13 +314,15 @@ TOOLSET_ENV_REQUIREMENTS = {
 def _run_post_setup(post_setup_key: str):
     """Run post-setup hooks for tools that need extra installation steps."""
     import shutil
+    npm_path = shutil.which("npm")
+    
     if post_setup_key in ("agent_browser", "browserbase"):
         node_modules = PROJECT_ROOT / "node_modules" / "agent-browser"
-        if not node_modules.exists() and shutil.which("npm"):
+        if not node_modules.exists() and npm_path:
             _print_info("    Installing Node.js dependencies for browser tools...")
             import subprocess
             result = subprocess.run(
-                ["npm", "install", "--silent"],
+                [npm_path, "install", "--silent"],
                 capture_output=True, text=True, cwd=str(PROJECT_ROOT)
             )
             if result.returncode == 0:
@@ -333,11 +335,11 @@ def _run_post_setup(post_setup_key: str):
 
     elif post_setup_key == "camofox":
         camofox_dir = PROJECT_ROOT / "node_modules" / "@askjo" / "camofox-browser"
-        if not camofox_dir.exists() and shutil.which("npm"):
+        if not camofox_dir.exists() and npm_path:
             _print_info("    Installing Camofox browser server...")
             import subprocess
             result = subprocess.run(
-                ["npm", "install", "--silent"],
+                [npm_path, "install", "--silent"],
                 capture_output=True, text=True, cwd=str(PROJECT_ROOT)
             )
             if result.returncode == 0:
@@ -349,7 +351,7 @@ def _run_post_setup(post_setup_key: str):
             _print_info("      npx @askjo/camofox-browser")
             _print_info("    First run downloads the Camoufox engine (~300MB)")
             _print_info("    Or use Docker: docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
-        elif not shutil.which("npm"):
+        elif not npm_path:
             _print_warning("    Node.js not found. Install Camofox via Docker:")
             _print_info("      docker run -p 9377:9377 -e CAMOFOX_PORT=9377 jo-inc/camofox-browser")
 

@@ -35,7 +35,7 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), [Open
 git clone https://github.com/hackerxj2010/hermes-agent.git
 cd hermes-agent
 # Install using uv
-curl -LsSf https://astral.sh/uv/install.ps1 | Invoke-Expression
+irm https://astral.sh/uv/install.ps1 | iex
 uv venv venv --python 3.11
 . venv\Scripts\Activate.ps1
 uv pip install -e ".[all]"

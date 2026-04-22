@@ -381,7 +381,7 @@ def test_check_fn_false_when_no_cdp_url(monkeypatch):
     import tools.browser_tool as bt
 
     monkeypatch.setattr(bt, "check_browser_requirements", lambda: True)
-    monkeypatch.setattr(bt, "_get_cdp_override", lambda: "")
+    monkeypatch.setattr(bt, "_get_live_cdp_endpoint", lambda: "")
     assert browser_cdp_tool._browser_cdp_check() is False
 
 
@@ -391,7 +391,7 @@ def test_check_fn_true_when_cdp_url_set(monkeypatch):
 
     monkeypatch.setattr(bt, "check_browser_requirements", lambda: True)
     monkeypatch.setattr(
-        bt, "_get_cdp_override", lambda: "ws://localhost:9222/devtools/browser/x"
+        bt, "_get_live_cdp_endpoint", lambda: "ws://localhost:9222/devtools/browser/x"
     )
     assert browser_cdp_tool._browser_cdp_check() is True
 
@@ -403,6 +403,16 @@ def test_check_fn_false_when_browser_requirements_fail(monkeypatch):
 
     monkeypatch.setattr(bt, "check_browser_requirements", lambda: False)
     monkeypatch.setattr(
-        bt, "_get_cdp_override", lambda: "ws://localhost:9222/devtools/browser/x"
+        bt, "_get_live_cdp_endpoint", lambda: "ws://localhost:9222/devtools/browser/x"
     )
     assert browser_cdp_tool._browser_cdp_check() is False
+
+
+def test_resolve_endpoint_uses_live_browser_harness_detection(monkeypatch):
+    import tools.browser_tool as bt
+
+    monkeypatch.setattr(
+        bt, "_get_live_cdp_endpoint", lambda: "ws://localhost:9222/devtools/browser/live"
+    )
+
+    assert browser_cdp_tool._resolve_cdp_endpoint() == "ws://localhost:9222/devtools/browser/live"

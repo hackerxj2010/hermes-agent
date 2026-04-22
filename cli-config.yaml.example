@@ -281,9 +281,13 @@ terminal:
 # Browser Tool Configuration
 # =============================================================================
 browser:
+  cloud_provider: "browser-harness"
   # Inactivity timeout in seconds - browser sessions are automatically closed
   # after this period of no activity between agent loops (default: 120 = 2 minutes)
   inactivity_timeout: 120
+
+web:
+  backend: "searxng"
 
 # =============================================================================
 # Context Compression (Auto-shrinks long conversations)

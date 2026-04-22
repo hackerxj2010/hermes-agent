@@ -78,10 +78,7 @@ try:
 except Exception:
     _is_safe_url = lambda url: False  # noqa: E731 — fail-closed: block all if safety module unavailable
 from tools.browser_providers.base import CloudBrowserProvider
-from tools.browser_providers.browserbase import BrowserbaseProvider
-from tools.browser_providers.browser_use import BrowserUseProvider
-from tools.browser_providers.firecrawl import FirecrawlProvider
-from tools.tool_backend_helpers import normalize_browser_cloud_provider
+from tools.browser_providers.browser_harness import BrowserHarnessProvider
 
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
@@ -292,9 +289,7 @@ def _get_cdp_override() -> str:
 # ============================================================================
 
 _PROVIDER_REGISTRY: Dict[str, type] = {
-    "browserbase": BrowserbaseProvider,
-    "browser-use": BrowserUseProvider,
-    "firecrawl": FirecrawlProvider,
+    "browser-harness": BrowserHarnessProvider,
 }
 
 _cached_cloud_provider: Optional[CloudBrowserProvider] = None
@@ -306,12 +301,12 @@ _agent_browser_resolved = False
 
 
 def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
-    """Return the configured cloud browser provider, or None for local mode.
+    """Return the currently configured browser provider instance.
 
-    Reads ``config["browser"]["cloud_provider"]`` once and caches the result
-    for the process lifetime. An explicit ``local`` provider disables cloud
-    fallback. If unset, fall back to Browserbase when direct or managed
-    Browserbase credentials are available.
+    Only supports local-first providers. Browser-Harness remains live even
+    when no browser is currently attached, because it can auto-detect a CDP
+    endpoint later in the same process and otherwise falls back to local
+    Chromium at runtime.
     """
     global _cached_cloud_provider, _cloud_provider_resolved
     if _cloud_provider_resolved:
@@ -321,30 +316,14 @@ def _get_cloud_provider() -> Optional[CloudBrowserProvider]:
     try:
         from hermes_cli.config import read_raw_config
         cfg = read_raw_config()
-        browser_cfg = cfg.get("browser", {})
-        provider_key = None
-        if isinstance(browser_cfg, dict) and "cloud_provider" in browser_cfg:
-            provider_key = normalize_browser_cloud_provider(
-                browser_cfg.get("cloud_provider")
-            )
-            if provider_key == "local":
-                _cached_cloud_provider = None
-                return None
-        if provider_key and provider_key in _PROVIDER_REGISTRY:
-            _cached_cloud_provider = _PROVIDER_REGISTRY[provider_key]()
-    except Exception as e:
-        logger.debug("Could not read cloud_provider from config: %s", e)
+        provider_name = cfg.get("browser", {}).get("cloud_provider")
 
-    if _cached_cloud_provider is None:
-        # Prefer Browser Use (managed Nous gateway or direct API key),
-        # fall back to Browserbase (direct credentials only).
-        fallback_provider = BrowserUseProvider()
-        if fallback_provider.is_configured():
-            _cached_cloud_provider = fallback_provider
+        if provider_name == "browser-harness":
+            _cached_cloud_provider = BrowserHarnessProvider()
         else:
-            fallback_provider = BrowserbaseProvider()
-            if fallback_provider.is_configured():
-                _cached_cloud_provider = fallback_provider
+            return None
+    except Exception as e:
+        logger.debug("Could not resolve browser cloud provider: %s", e)
 
     return _cached_cloud_provider
 
@@ -376,17 +355,44 @@ def _is_local_mode() -> bool:
     return _get_cloud_provider() is None
 
 
-def _is_local_backend() -> bool:
-    """Return True when the browser runs locally (no cloud provider).
+def _provider_is_local(provider: Optional[CloudBrowserProvider]) -> bool:
+    """Return True when a configured provider still runs on the local machine."""
+    if provider is None:
+        return False
+    try:
+        return provider.provider_name() == "browser-harness"
+    except Exception:
+        return False
 
-    SSRF protection is only meaningful for cloud backends (Browserbase,
-    BrowserUse) where the agent could reach internal resources on a remote
-    machine.  For local backends — Camofox, or the built-in headless
-    Chromium without a cloud provider — the user already has full terminal
-    and network access on the same machine, so the check adds no security
-    value.
+
+def _is_local_backend() -> bool:
+    """Return True when the browser runs locally or is attached to a local browser.
+
+    SSRF protection is only meaningful for cloud backends where the agent
+    could reach internal resources on a remote machine.  Local backends —
+    Camofox, the built-in headless Chromium, and Browser-Harness — all run
+    on the same machine as the user, so the check adds no security value.
     """
-    return _is_camofox_mode() or _get_cloud_provider() is None
+    provider = _get_cloud_provider()
+    return _is_camofox_mode() or provider is None or _provider_is_local(provider)
+
+
+def _get_live_cdp_endpoint() -> str:
+    """Return the best reachable CDP endpoint available right now, if any."""
+    override = _get_cdp_override()
+    if override:
+        return override
+
+    provider = _get_cloud_provider()
+    if not _provider_is_local(provider):
+        return ""
+
+    try:
+        resolved = getattr(provider, "resolve_cdp_url", lambda: "")()
+        return (resolved or "").strip()
+    except Exception as e:
+        logger.debug("Could not auto-detect live CDP endpoint from provider: %s", e)
+        return ""
 
 
 def _allow_private_urls() -> bool:
@@ -2338,11 +2344,12 @@ def check_browser_requirements() -> bool:
     """
     Check if browser tool requirements are met.
 
-    In **local mode** (no cloud provider configured): only the
+    In **local mode** (no browser provider configured): only the
     ``agent-browser`` CLI must be findable.
 
-    In **cloud mode** (Browserbase, Browser Use, or Firecrawl): the CLI
-    *and* the provider's required credentials must be present.
+    In **Browser-Harness mode** the CLI must be present; a live browser
+    attachment is optional because we can auto-detect CDP later or fall back
+    to local Chromium at runtime.
 
     Returns:
         True if all requirements are met, False otherwise
@@ -2364,9 +2371,11 @@ def check_browser_requirements() -> bool:
     if _requires_real_termux_browser_install(browser_cmd):
         return False
 
-    # In cloud mode, also require provider credentials
+    # Providers that truly need up-front credentials/configuration can still
+    # gate availability here. Browser-Harness is intentionally allowed even
+    # before a live browser is attached because it can recover later.
     provider = _get_cloud_provider()
-    if provider is not None and not provider.is_configured():
+    if provider is not None and not _provider_is_local(provider) and not provider.is_configured():
         return False
 
     return True

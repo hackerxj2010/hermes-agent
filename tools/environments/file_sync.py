@@ -297,13 +297,18 @@ class FileSyncManager:
         except Exception:
             file_mapping = []
 
-        with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
-            self._bulk_download_fn(Path(tf.name))
+        tf_name = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".tar", delete=False) as tf:
+                tf_name = tf.name
+            
+            # File is now closed, safe for bulk_download_fn to open and write to it (Windows compat)
+            self._bulk_download_fn(Path(tf_name))
 
             # Defensive size cap: a misbehaving sandbox could produce an
             # arbitrarily large tar. Refuse to extract if it exceeds the cap.
             try:
-                tar_size = os.path.getsize(tf.name)
+                tar_size = os.path.getsize(tf_name)
             except OSError:
                 tar_size = 0
             if tar_size > _SYNC_BACK_MAX_BYTES:
@@ -314,7 +319,7 @@ class FileSyncManager:
                 return
 
             with tempfile.TemporaryDirectory(prefix="hermes-sync-back-") as staging:
-                with tarfile.open(tf.name) as tar:
+                with tarfile.open(tf_name) as tar:
                     tar.extractall(staging, filter="data")
 
                 applied = 0
@@ -322,6 +327,8 @@ class FileSyncManager:
                     for fname in filenames:
                         staged_file = os.path.join(dirpath, fname)
                         rel = os.path.relpath(staged_file, staging)
+                        # Ensure remote path always uses forward slashes, even on Windows
+                        rel = rel.replace(os.sep, "/")
                         remote_path = "/" + rel
 
                         pushed_hash = self._pushed_hashes.get(remote_path)
@@ -363,6 +370,12 @@ class FileSyncManager:
                     logger.info("sync_back: applied %d changed file(s)", applied)
                 else:
                     logger.debug("sync_back: no remote changes detected")
+        finally:
+            if tf_name and os.path.exists(tf_name):
+                try:
+                    os.unlink(tf_name)
+                except OSError:
+                    pass
 
     def _resolve_host_path(self, remote_path: str,
                            file_mapping: list[tuple[str, str]] | None = None) -> str | None:
@@ -383,11 +396,15 @@ class FileSyncManager:
         ``~/.hermes/skills/a.md``, a new remote file at
         ``/root/.hermes/skills/b.md`` maps to ``~/.hermes/skills/b.md``.
         """
+        import os
+        import posixpath
         mapping = file_mapping if file_mapping is not None else []
         for host, remote in mapping:
-            remote_dir = str(Path(remote).parent)
+            remote_dir = posixpath.dirname(remote)
             if remote_path.startswith(remote_dir + "/"):
-                host_dir = str(Path(host).parent)
+                host_dir = os.path.dirname(host)
                 suffix = remote_path[len(remote_dir):]
+                # Combine using host OS separator
+                suffix = suffix.replace("/", os.sep)
                 return host_dir + suffix
         return None

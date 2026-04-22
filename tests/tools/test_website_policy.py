@@ -364,9 +364,8 @@ async def test_web_extract_short_circuits_blocked_url(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        web_tools,
-        "_get_firecrawl_client",
-        lambda: pytest.fail("firecrawl should not run for blocked URL"),
+        "tools.web_tools.httpx.AsyncClient.get",
+        lambda *args, **kwargs: pytest.fail("network call should not run for blocked URL"),
     )
     monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
 
@@ -414,18 +413,19 @@ async def test_web_extract_blocks_redirected_final_url(monkeypatch):
             }
         pytest.fail(f"unexpected URL checked: {url}")
 
-    class FakeFirecrawlClient:
-        def scrape(self, url, formats):
-            return {
-                "markdown": "secret content",
-                "metadata": {
-                    "title": "Redirected",
-                    "sourceURL": "https://blocked.test/final",
-                },
-            }
+    class FakeResponse:
+        def __init__(self, url, text):
+            self.url = url
+            self.text = text
+        def raise_for_status(self): pass
+
+    async def fake_get(self, url, **kwargs):
+        if url == "https://allowed.test":
+            return FakeResponse("https://blocked.test/final", "secret content")
+        pytest.fail(f"unexpected fetch URL: {url}")
 
     monkeypatch.setattr(web_tools, "check_website_access", fake_check)
-    monkeypatch.setattr(web_tools, "_get_firecrawl_client", lambda: FakeFirecrawlClient())
+    monkeypatch.setattr("tools.web_tools.httpx.AsyncClient.get", fake_get)
     monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
 
     result = json.loads(await web_tools.web_extract_tool(["https://allowed.test"], use_llm_processing=False))
@@ -439,8 +439,6 @@ async def test_web_extract_blocks_redirected_final_url(monkeypatch):
 async def test_web_crawl_short_circuits_blocked_url(monkeypatch):
     from tools import web_tools
 
-    # web_crawl_tool checks for Firecrawl env before website policy
-    monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
     # Allow test URLs past SSRF check so website policy is what gets tested
     monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
     monkeypatch.setattr(
@@ -454,9 +452,8 @@ async def test_web_crawl_short_circuits_blocked_url(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        web_tools,
-        "_get_firecrawl_client",
-        lambda: pytest.fail("firecrawl should not run for blocked crawl URL"),
+        "tools.web_tools.httpx.AsyncClient.get",
+        lambda *args, **kwargs: pytest.fail("network call should not run for blocked crawl URL"),
     )
     monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
 
@@ -470,8 +467,6 @@ async def test_web_crawl_short_circuits_blocked_url(monkeypatch):
 async def test_web_crawl_blocks_redirected_final_url(monkeypatch):
     from tools import web_tools
 
-    # web_crawl_tool checks for Firecrawl env before website policy
-    monkeypatch.setenv("FIRECRAWL_API_KEY", "fake-key")
     # Allow test URLs past SSRF check so website policy is what gets tested
     monkeypatch.setattr(web_tools, "is_safe_url", lambda url: True)
 
@@ -487,23 +482,23 @@ async def test_web_crawl_blocks_redirected_final_url(monkeypatch):
             }
         pytest.fail(f"unexpected URL checked: {url}")
 
-    class FakeCrawlClient:
-        def crawl(self, url, **kwargs):
-            return {
-                "data": [
-                    {
-                        "markdown": "secret crawl content",
-                        "metadata": {
-                            "title": "Redirected crawl page",
-                            "sourceURL": "https://blocked.test/final",
-                        },
-                    }
-                ]
-            }
+    class FakeResponse:
+        def __init__(self, url, text):
+            self.url = url
+            self.text = text
+        def raise_for_status(self): pass
+
+    async def fake_get(self, url, **kwargs):
+        if url == "https://allowed.test":
+            return FakeResponse("https://blocked.test/final", "secret crawl content")
+        pytest.fail(f"unexpected fetch URL: {url}")
 
     monkeypatch.setattr(web_tools, "check_website_access", fake_check)
-    monkeypatch.setattr(web_tools, "_get_firecrawl_client", lambda: FakeCrawlClient())
+    monkeypatch.setattr("tools.web_tools.httpx.AsyncClient.get", fake_get)
     monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+    
+    # We also need to mock _searxng_search to just return our initial url to extract
+    monkeypatch.setattr(web_tools, "_searxng_search", lambda q, limit: {"data": {"web": []}})
 
     result = json.loads(await web_tools.web_crawl_tool("https://allowed.test", use_llm_processing=False))
 

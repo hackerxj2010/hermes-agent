@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Dict, Optional
 
 from tools.registry import registry, tool_error
@@ -72,16 +71,17 @@ def _run_async(coro):
 def _resolve_cdp_endpoint() -> str:
     """Return the normalized CDP WebSocket URL, or empty string if unavailable.
 
-    Delegates to ``tools.browser_tool._get_cdp_override`` so precedence stays
+    Delegates to ``tools.browser_tool._get_live_cdp_endpoint`` so precedence stays
     consistent with the rest of the browser tool surface:
 
     1. ``BROWSER_CDP_URL`` env var (live override from ``/browser connect``)
     2. ``browser.cdp_url`` in ``config.yaml``
+    3. Browser-Harness auto-detection of a live local DevTools endpoint
     """
     try:
-        from tools.browser_tool import _get_cdp_override  # type: ignore[import-not-found]
+        from tools.browser_tool import _get_live_cdp_endpoint  # type: ignore[import-not-found]
 
-        return (_get_cdp_override() or "").strip()
+        return (_get_live_cdp_endpoint() or "").strip()
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp: failed to resolve CDP endpoint: %s", exc)
         return ""
@@ -229,7 +229,8 @@ def browser_cdp(
     if not endpoint:
         return tool_error(
             "No CDP endpoint is available. Run '/browser connect' to attach "
-            "to a running Chrome, or set 'browser.cdp_url' in config.yaml. "
+            "to a running Chrome, set 'browser.cdp_url' in config.yaml, or "
+            "enable Browser-Harness with a browser launched in remote-debug mode. "
             "The Camofox backend is REST-only and does not expose CDP.",
             cdp_docs=CDP_DOCS_URL,
         )
@@ -302,12 +303,11 @@ BROWSER_CDP_SCHEMA: Dict[str, Any] = {
         "browser operations not covered by browser_navigate, browser_click, "
         "browser_console, etc.\n\n"
         "**Requires a reachable CDP endpoint.** Available when the user has "
-        "run '/browser connect' to attach to a running Chrome, or when "
-        "'browser.cdp_url' is set in config.yaml. Not currently wired up for "
-        "cloud backends (Browserbase, Browser Use, Firecrawl) — those expose "
-        "CDP per session but live-session routing is a follow-up. Camofox is "
-        "REST-only and will never support CDP. If the tool is in your toolset "
-        "at all, a CDP endpoint is already reachable.\n\n"
+        "run '/browser connect' to attach to a running Chrome, when "
+        "'browser.cdp_url' is set in config.yaml, or when Browser-Harness "
+        "auto-detects a live local DevTools endpoint. Camofox is REST-only "
+        "and will never support CDP. If the tool is in your toolset at all, "
+        "a CDP endpoint is already reachable.\n\n"
         f"**CDP method reference:** {CDP_DOCS_URL} — use web_extract on a "
         "method's URL (e.g. '/tot/Page/#method-handleJavaScriptDialog') "
         "to look up parameters and return shape.\n\n"
@@ -374,14 +374,14 @@ def _browser_cdp_check() -> bool:
     """Availability check for browser_cdp.
 
     The tool is only offered when the Python side can actually reach a CDP
-    endpoint right now — meaning a static URL is set via ``/browser connect``
-    (``BROWSER_CDP_URL``) or ``browser.cdp_url`` in ``config.yaml``.
+    endpoint right now — via ``/browser connect`` (``BROWSER_CDP_URL``),
+    ``browser.cdp_url`` in ``config.yaml``, or Browser-Harness auto-detection
+    of a running local browser.
 
-    Backends that do *not* currently expose CDP to us — Camofox (REST-only),
-    the default local agent-browser mode (Playwright hides its internal CDP
-    port), and cloud providers whose per-session ``cdp_url`` is not yet
-    surfaced — are gated out so the model doesn't see a tool that would
-    reliably fail.  Cloud-provider CDP routing is a follow-up.
+    Backends that do *not* currently expose CDP to us — Camofox (REST-only)
+    and the default local agent-browser mode (Playwright hides its internal
+    CDP port) — are gated out so the model doesn't see a tool that would
+    reliably fail.
 
     Kept in a thin wrapper so the registration statement stays at module top
     level (the tool-discovery AST scan only picks up top-level
@@ -389,7 +389,7 @@ def _browser_cdp_check() -> bool:
     """
     try:
         from tools.browser_tool import (  # type: ignore[import-not-found]
-            _get_cdp_override,
+            _get_live_cdp_endpoint,
             check_browser_requirements,
         )
     except ImportError as exc:  # pragma: no cover — defensive
@@ -397,7 +397,7 @@ def _browser_cdp_check() -> bool:
         return False
     if not check_browser_requirements():
         return False
-    return bool(_get_cdp_override())
+    return bool(_get_live_cdp_endpoint())
 
 
 registry.register(

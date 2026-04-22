@@ -134,6 +134,15 @@ class TestIsLocalBackend:
 
         assert browser_tool._is_local_backend() is False
 
+    def test_browser_harness_provider_counts_as_local(self, monkeypatch):
+        """Browser-Harness attaches to a local browser and counts as local."""
+        from tools.browser_providers.browser_harness import BrowserHarnessProvider
+
+        monkeypatch.setattr(browser_tool, "_is_camofox_mode", lambda: False)
+        monkeypatch.setattr(browser_tool, "_get_cloud_provider", lambda: BrowserHarnessProvider())
+
+        assert browser_tool._is_local_backend() is True
+
 
 # ---------------------------------------------------------------------------
 # Post-redirect SSRF check

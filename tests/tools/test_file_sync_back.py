@@ -1,6 +1,9 @@
 """Tests for FileSyncManager.sync_back() — pull remote changes to host."""
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 import io
 import logging
 import os
@@ -307,6 +310,7 @@ class TestPushedHashesPopulated:
 class TestSyncBackFileLock:
     """Verify that fcntl.flock is used during sync-back."""
 
+    @pytest.mark.skipif(fcntl is None, reason="fcntl is Unix only")
     @patch("tools.environments.file_sync.fcntl.flock")
     def test_sync_back_file_lock(self, mock_flock, tmp_path):
         download_fn = _make_download_fn({})

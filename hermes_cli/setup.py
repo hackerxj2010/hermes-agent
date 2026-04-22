@@ -1189,6 +1189,29 @@ def setup_terminal_backend(config: dict):
         print_success("Terminal backend: Local")
         print_info("Commands run directly on this machine.")
 
+        # Shell selection (Windows only — Linux is always bash)
+        is_windows = _platform.system() == "Windows"
+        if is_windows:
+            print()
+            print_info("Select the shell Hermes uses to run commands on your machine.")
+            print_info("  PowerShell: native Windows experience — uses PowerShell cmdlets.")
+            print_info("  Bash: requires Git for Windows — Linux compatibility mode.")
+            shell_choices = [
+                "PowerShell (native Windows — recommended)",
+                "Bash (Git Bash — Linux compatibility mode)",
+            ]
+            current_shell = config.get("terminal", {}).get("shell", "powershell")
+            default_shell_idx = 0 if current_shell == "powershell" else 1
+            shell_idx = prompt_choice("Select shell:", shell_choices, default_shell_idx)
+            selected_shell = "powershell" if shell_idx == 0 else "bash"
+            config.setdefault("terminal", {})["shell"] = selected_shell
+            save_env_value("TERMINAL_SHELL", selected_shell)
+            print_success(f"Shell set to: {selected_shell}")
+        else:
+            # Linux/macOS: always bash
+            config.setdefault("terminal", {})["shell"] = "bash"
+            save_env_value("TERMINAL_SHELL", "bash")
+
         # CWD for messaging
         print()
         print_info("Working directory for messaging sessions:")

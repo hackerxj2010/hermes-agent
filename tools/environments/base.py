@@ -1,9 +1,13 @@
 """Base class for all Hermes execution environment backends.
 
-Unified spawn-per-call model: every command spawns a fresh ``bash -c`` process.
+Unified spawn-per-call model: every command spawns a fresh shell process.
 A session snapshot (env vars, functions, aliases) is captured once at init and
 re-sourced before each command. CWD persists via in-band stdout markers (remote)
 or a temp file (local).
+
+The shell used (bash or PowerShell) is determined by the ShellAdapter attached
+to each environment instance.  Container/remote backends always use bash;
+the local backend respects the user's TERMINAL_SHELL setting.
 """
 
 import codecs
@@ -285,17 +289,27 @@ class BaseEnvironment(ABC):
         LocalEnvironment overrides this on platforms like Termux where ``/tmp``
         may be missing and ``TMPDIR`` is the portable writable location.
         """
+        if hasattr(self, '_shell_adapter'):
+            return self._shell_adapter.get_temp_dir()
         return "/tmp"
 
-    def __init__(self, cwd: str, timeout: int, env: dict = None):
+    def __init__(self, cwd: str, timeout: int, env: dict = None, shell_adapter=None):
+        from tools.environments.shell_adapter import BashShellAdapter
+        self._shell_adapter = shell_adapter or BashShellAdapter()
         self.cwd = cwd
         self.timeout = timeout
         self.env = env or {}
 
         self._session_id = uuid.uuid4().hex[:12]
-        temp_dir = self.get_temp_dir().rstrip("/") or "/"
-        self._snapshot_path = f"{temp_dir}/hermes-snap-{self._session_id}.sh"
-        self._cwd_file = f"{temp_dir}/hermes-cwd-{self._session_id}.txt"
+        temp_dir = self.get_temp_dir()
+        # Normalize: strip trailing separator for consistent path building
+        if temp_dir.endswith('/') and len(temp_dir) > 1:
+            temp_dir = temp_dir.rstrip('/')
+        elif temp_dir.endswith('\\') and len(temp_dir) > 3:  # e.g. C:\Users\Temp\
+            temp_dir = temp_dir.rstrip('\\')
+        sep = os.sep if self._shell_adapter.name == 'powershell' else '/'
+        self._snapshot_path = f"{temp_dir}{sep}hermes-snap-{self._session_id}.sh"
+        self._cwd_file = f"{temp_dir}{sep}hermes-cwd-{self._session_id}.txt"
         self._cwd_marker = _cwd_marker(self._session_id)
         self._snapshot_ready = False
 
@@ -332,18 +346,11 @@ class BaseEnvironment(ABC):
 
         Called once after backend construction.  On success, sets
         ``_snapshot_ready = True`` so subsequent commands source the snapshot
-        instead of running with ``bash -l``.
+        instead of running with a login shell.
         """
-        # Full capture: env vars, functions (filtered), aliases, shell options.
-        bootstrap = (
-            f"export -p > {self._snapshot_path}\n"
-            f"declare -f | grep -vE '^_[^_]' >> {self._snapshot_path}\n"
-            f"alias -p >> {self._snapshot_path}\n"
-            f"echo 'shopt -s expand_aliases' >> {self._snapshot_path}\n"
-            f"echo 'set +e' >> {self._snapshot_path}\n"
-            f"echo 'set +u' >> {self._snapshot_path}\n"
-            f"pwd -P > {self._cwd_file} 2>/dev/null || true\n"
-            f"printf '\\n{self._cwd_marker}%s{self._cwd_marker}\\n' \"$(pwd -P)\"\n"
+        # Delegate snapshot script generation to the shell adapter
+        bootstrap = self._shell_adapter.build_snapshot_script(
+            self._snapshot_path, self._cwd_file, self._cwd_marker
         )
         try:
             proc = self._run_bash(bootstrap, login=True, timeout=self._snapshot_timeout)
@@ -351,15 +358,17 @@ class BaseEnvironment(ABC):
             self._snapshot_ready = True
             self._update_cwd(result)
             logger.info(
-                "Session snapshot created (session=%s, cwd=%s)",
+                "Session snapshot created (session=%s, shell=%s, cwd=%s)",
                 self._session_id,
+                self._shell_adapter.name,
                 self.cwd,
             )
         except Exception as exc:
             logger.warning(
-                "init_session failed (session=%s): %s — "
-                "falling back to bash -l per command",
+                "init_session failed (session=%s, shell=%s): %s — "
+                "falling back to login shell per command",
                 self._session_id,
+                self._shell_adapter.name,
                 exc,
             )
             self._snapshot_ready = False
@@ -369,42 +378,19 @@ class BaseEnvironment(ABC):
     # ------------------------------------------------------------------
 
     def _wrap_command(self, command: str, cwd: str) -> str:
-        """Build the full bash script that sources snapshot, cd's, runs command,
-        re-dumps env vars, and emits CWD markers."""
-        escaped = command.replace("'", "'\\''")
+        """Build the full shell script that sources snapshot, cd's, runs command,
+        re-dumps env vars, and emits CWD markers.
 
-        parts = []
-
-        # Source snapshot (env vars from previous commands)
-        if self._snapshot_ready:
-            parts.append(f"source {self._snapshot_path} 2>/dev/null || true")
-
-        # cd to working directory — let bash expand ~ natively
-        quoted_cwd = (
-            shlex.quote(cwd) if cwd != "~" and not cwd.startswith("~/") else cwd
+        Delegates all shell-specific syntax to ``self._shell_adapter``.
+        """
+        return self._shell_adapter.wrap_command(
+            command=command,
+            cwd=cwd,
+            snapshot_path=self._snapshot_path,
+            cwd_file=self._cwd_file,
+            cwd_marker=self._cwd_marker,
+            snapshot_ready=self._snapshot_ready,
         )
-        parts.append(f"cd {quoted_cwd} || exit 126")
-
-        # Run the actual command
-        parts.append(f"eval '{escaped}'")
-        parts.append("__hermes_ec=$?")
-
-        # Re-dump env vars to snapshot (last-writer-wins for concurrent calls)
-        if self._snapshot_ready:
-            parts.append(f"export -p > {self._snapshot_path} 2>/dev/null || true")
-
-        # Write CWD to file (local reads this) and stdout marker (remote parses this)
-        parts.append(f"pwd -P > {self._cwd_file} 2>/dev/null || true")
-        # Use a distinct line for the marker. The leading \n ensures
-        # the marker starts on its own line even if the command doesn't
-        # end with a newline (e.g. printf 'exact'). We'll strip this
-        # injected newline in _extract_cwd_from_output.
-        parts.append(
-            f"printf '\\n{self._cwd_marker}%s{self._cwd_marker}\\n' \"$(pwd -P)\""
-        )
-        parts.append("exit $__hermes_ec")
-
-        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # Stdin heredoc embedding (for SDK backends)

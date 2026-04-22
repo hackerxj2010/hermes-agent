@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 
 from tools.environments.base import BaseEnvironment, _pipe_stdin
+from tools.environments.shell_adapter import get_shell_adapter, get_shell_for_env_type
 
 _IS_WINDOWS = platform.system() == "Windows"
 
@@ -139,41 +140,23 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
 
 
 def _find_bash() -> str:
-    """Find bash for command execution."""
-    if not _IS_WINDOWS:
-        return (
-            shutil.which("bash")
-            or ("/usr/bin/bash" if os.path.isfile("/usr/bin/bash") else None)
-            or ("/bin/bash" if os.path.isfile("/bin/bash") else None)
-            or os.environ.get("SHELL")
-            or "/bin/sh"
-        )
+    """Find bash for command execution.
 
-    custom = os.environ.get("HERMES_GIT_BASH_PATH")
-    if custom and os.path.isfile(custom):
-        return custom
-
-    found = shutil.which("bash")
-    if found:
-        return found
-
-    for candidate in (
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "Git", "bin", "bash.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Git", "bin", "bash.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Git", "bin", "bash.exe"),
-    ):
-        if candidate and os.path.isfile(candidate):
-            return candidate
-
-    raise RuntimeError(
-        "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
-        "Install it from: https://git-scm.com/download/win\n"
-        "Or set HERMES_GIT_BASH_PATH to your bash.exe location."
-    )
+    .. deprecated::
+        Use ``get_shell_adapter().find_shell()`` instead.
+        Kept for backward compatibility with process_registry imports.
+    """
+    from tools.environments.shell_adapter import BashShellAdapter
+    return BashShellAdapter().find_shell()
 
 
-# Backward compat — process_registry.py imports this name
-_find_shell = _find_bash
+def _find_shell() -> str:
+    """Find the configured shell (bash or PowerShell) for local execution.
+
+    Reads TERMINAL_SHELL to determine which adapter to use.
+    """
+    adapter = get_shell_adapter()
+    return adapter.find_shell()
 
 
 # Standard PATH entries for environments with minimal PATH.
@@ -184,33 +167,17 @@ _SANE_PATH = (
 
 
 def _make_run_env(env: dict) -> dict:
-    """Build a run environment with a sane PATH and provider-var stripping."""
+    """Build a run environment with a sane PATH and provider-var stripping.
+
+    Delegates PATH construction to the active shell adapter.
+    """
+    adapter = get_shell_adapter()
     try:
         from tools.env_passthrough import is_env_passthrough as _is_passthrough
     except Exception:
         _is_passthrough = lambda _: False  # noqa: E731
 
-    merged = dict(os.environ | env)
-    run_env = {}
-    for k, v in merged.items():
-        if k.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
-            real_key = k[len(_HERMES_PROVIDER_ENV_FORCE_PREFIX):]
-            run_env[real_key] = v
-        elif k not in _HERMES_PROVIDER_ENV_BLOCKLIST or _is_passthrough(k):
-            run_env[k] = v
-    existing_path = run_env.get("PATH", "")
-    if "/usr/bin" not in existing_path.split(":"):
-        run_env["PATH"] = f"{existing_path}:{_SANE_PATH}" if existing_path else _SANE_PATH
-
-    # Per-profile HOME isolation: redirect system tool configs (git, ssh, gh,
-    # npm …) into {HERMES_HOME}/home/ when that directory exists.  Only the
-    # subprocess sees the override — the Python process keeps the real HOME.
-    from hermes_constants import get_subprocess_home
-    _profile_home = get_subprocess_home()
-    if _profile_home:
-        run_env["HOME"] = _profile_home
-
-    return run_env
+    return adapter.make_run_env(env, _HERMES_PROVIDER_ENV_BLOCKLIST, _is_passthrough)
 
 
 def _read_terminal_shell_init_config() -> tuple[list[str], bool]:
@@ -287,56 +254,56 @@ def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
 class LocalEnvironment(BaseEnvironment):
     """Run commands directly on the host machine.
 
-    Spawn-per-call: every execute() spawns a fresh bash process.
+    Spawn-per-call: every execute() spawns a fresh shell process.
+    The shell type (bash or PowerShell) is determined by the ShellAdapter.
     Session snapshot preserves env vars across calls.
     CWD persists via file-based read after each command.
     """
 
     def __init__(self, cwd: str = "", timeout: int = 60, env: dict = None):
-        super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
+        adapter = get_shell_for_env_type("local")
+        super().__init__(
+            cwd=cwd or os.getcwd(),
+            timeout=timeout,
+            env=env,
+            shell_adapter=adapter,
+        )
         self.init_session()
 
     def get_temp_dir(self) -> str:
         """Return a shell-safe writable temp dir for local execution.
 
-        Termux does not provide /tmp by default, but exposes a POSIX TMPDIR.
-        Prefer POSIX-style env vars when available, keep using /tmp on regular
-        Unix systems, and only fall back to tempfile.gettempdir() when it also
-        resolves to a POSIX path.
-
-        Check the environment configured for this backend first so callers can
-        override the temp root explicitly (for example via terminal.env or a
-        custom TMPDIR), then fall back to the host process environment.
+        Delegates to the shell adapter which knows the platform conventions.
         """
+        # Check the environment configured for this backend first
         for env_var in ("TMPDIR", "TMP", "TEMP"):
             candidate = self.env.get(env_var) or os.environ.get(env_var)
-            if candidate and candidate.startswith("/"):
-                return candidate.rstrip("/") or "/"
+            if candidate:
+                if self._shell_adapter.name == "powershell":
+                    # Windows paths
+                    if os.path.isdir(candidate):
+                        return candidate
+                else:
+                    # POSIX paths
+                    if candidate.startswith("/"):
+                        return candidate.rstrip("/") or "/"
 
-        if os.path.isdir("/tmp") and os.access("/tmp", os.W_OK | os.X_OK):
-            return "/tmp"
-
-        candidate = tempfile.gettempdir()
-        if candidate.startswith("/"):
-            return candidate.rstrip("/") or "/"
-
-        return "/tmp"
+        return self._shell_adapter.get_temp_dir()
 
     def _run_bash(self, cmd_string: str, *, login: bool = False,
                   timeout: int = 120,
                   stdin_data: str | None = None) -> subprocess.Popen:
-        bash = _find_bash()
+        adapter = self._shell_adapter
+
         # For login-shell invocations (used by init_session to build the
-        # environment snapshot), prepend sources for the user's bashrc /
-        # custom init files so tools registered outside bash_profile
-        # (nvm, asdf, pyenv, …) end up on PATH in the captured snapshot.
-        # Non-login invocations are already sourcing the snapshot and
-        # don't need this.
+        # environment snapshot), prepend sources for the user's init files
+        # so tools registered there end up on PATH in the captured snapshot.
         if login:
             init_files = _resolve_shell_init_files()
             if init_files:
-                cmd_string = _prepend_shell_init(cmd_string, init_files)
-        args = [bash, "-l", "-c", cmd_string] if login else [bash, "-c", cmd_string]
+                cmd_string = adapter.prepend_init_files(cmd_string, init_files)
+
+        args = adapter.build_run_args(cmd_string, login=login)
         run_env = _make_run_env(self.env)
 
         proc = subprocess.Popen(
@@ -348,7 +315,7 @@ class LocalEnvironment(BaseEnvironment):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
-            preexec_fn=None if _IS_WINDOWS else os.setsid,
+            preexec_fn=adapter.get_preexec_fn(),
         )
 
         if stdin_data is not None:
@@ -358,21 +325,7 @@ class LocalEnvironment(BaseEnvironment):
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
-        try:
-            if _IS_WINDOWS:
-                proc.terminate()
-            else:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGTERM)
-                try:
-                    proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            try:
-                proc.kill()
-            except Exception:
-                pass
+        self._shell_adapter.kill_process(proc)
 
     def _update_cwd(self, result: dict):
         """Read CWD from temp file (local-only, no round-trip needed)."""

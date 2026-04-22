@@ -281,6 +281,16 @@ def show_status(args):
         except Exception:
             terminal_env = "local"
     print(f"  Backend:      {terminal_env}")
+
+    # Show active shell
+    terminal_shell = os.getenv("TERMINAL_SHELL", "")
+    if not terminal_shell:
+        try:
+            terminal_shell = _cfg.get("terminal", {}).get("shell", "")
+        except Exception:
+            pass
+    if terminal_env == "local" and terminal_shell:
+        print(f"  Shell:        {terminal_shell}")
     
     if terminal_env == "ssh":
         ssh_host = os.getenv("TERMINAL_SSH_HOST", "")

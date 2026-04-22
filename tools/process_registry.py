@@ -42,6 +42,7 @@ import uuid
 
 _IS_WINDOWS = platform.system() == "Windows"
 from tools.environments.local import _find_shell, _sanitize_subprocess_env
+from tools.environments.shell_adapter import get_shell_adapter
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -342,10 +343,15 @@ class ProcessRegistry:
                 else:
                     from ptyprocess import PtyProcess as _PtyProcessCls
                 user_shell = _find_shell()
+                adapter = get_shell_adapter()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
+                if adapter.name == "powershell":
+                    pty_args = adapter.build_run_args(command)
+                else:
+                    pty_args = [user_shell, "-lic", f"set +m; {command}"]
                 pty_proc = _PtyProcessCls.spawn(
-                    [user_shell, "-lic", f"set +m; {command}"],
+                    pty_args,
                     cwd=session.cwd,
                     env=pty_env,
                     dimensions=(30, 120),
@@ -380,13 +386,18 @@ class ProcessRegistry:
         # Use the user's login shell for consistency with LocalEnvironment --
         # ensures rc files are sourced and user tools are available.
         user_shell = _find_shell()
+        adapter = get_shell_adapter()
         # Force unbuffered output for Python scripts so progress is visible
         # during background execution (libraries like tqdm/datasets buffer when
         # stdout is a pipe, hiding output from process(action="poll")).
         bg_env = _sanitize_subprocess_env(os.environ, env_vars)
         bg_env["PYTHONUNBUFFERED"] = "1"
+        if adapter.name == "powershell":
+            args = adapter.build_run_args(command)
+        else:
+            args = [user_shell, "-lic", f"set +m; {command}"]
         proc = subprocess.Popen(
-            [user_shell, "-lic", f"set +m; {command}"],
+            args,
             text=True,
             cwd=session.cwd,
             env=bg_env,
